@@ -1,0 +1,7 @@
+{
+  "_note": "EXAMPLE ONLY - made up to show the shape this Skill can handle. The real case file is /input/case.json.",
+  "case_id": "demo-001",
+  "task": "Parse the attached paper: sections, tables and references with page evidence.",
+  "input_files": ["paper.pdf"],
+  "output_contract": ["case_id", "status", "sections", "tables", "references", "evidence", "uncertainty", "change_records", "sources"]
+}

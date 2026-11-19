@@ -556,26 +556,156 @@ def open_backend(path, want):
 # ----------------------------------------------------------------------------------------------
 # OCR (optional, only for pages without a usable text layer)
 # ----------------------------------------------------------------------------------------------
-def find_ocr():
-    if shutil.which("tesseract"):
-        return "tesseract"
+_RAPID = None
+OCR_ENGINE_PREF = "auto"
+
+
+def _rapid_module():
+    """'v3' (pip rapidocr, word boxes) or 'v1' (rapidocr-onnxruntime) or None."""
     try:
-        import pytesseract  # type: ignore  # noqa: F401,F811
-        return "pytesseract"
+        import rapidocr  # type: ignore  # noqa: F401
+        return "v3"
+    except Exception:
+        pass
+    try:
+        import rapidocr_onnxruntime  # type: ignore  # noqa: F401
+        return "v1"
     except Exception:
         return None
 
 
-def ocr_page(backend, i, lang, dpi=300):
-    """Return (lines, info). Uses the tesseract CLI on a rendered PNG. Never invents text."""
+def _is_cjk(ch):
+    o = ord(ch)
+    return 0x2E80 <= o <= 0x9FFF or 0xAC00 <= o <= 0xD7AF or 0xFF00 <= o <= 0xFFEF or 0x3000 <= o <= 0x303F
+
+
+def _join_words(items, line_h):
+    """Join word-level OCR tokens [(text, x0, x1)]. Real words (>= 2 chars on either side) are always space-separated;
+    single-character tokens (the engine splits CJK lines and digits per character) are glued unless the boxes are a
+    word-space apart; nothing is spaced next to CJK characters (Chinese has no spaces)."""
+    out, prev_x1, prev_tok = "", None, ""
+    for text, x0, x1 in items:
+        if out and not (_is_cjk(out[-1]) or _is_cjk(text[0])):
+            gap = x0 - prev_x1
+            if len(prev_tok) >= 2 or len(text) >= 2 or gap >= 0.15 * line_h:
+                out += " "
+        out += text
+        prev_x1, prev_tok = x1, text
+    return out
+
+
+def find_ocr():
+    """OCR engine to use: 'rapidocr' (pip, bundled CJK+Latin models), 'tesseract' (CLI) or 'pytesseract'."""
+    pref = OCR_ENGINE_PREF
+    if pref in ("auto", "rapidocr"):
+        if _rapid_module() is not None:
+            return "rapidocr"
+        if pref == "rapidocr":
+            return None
+    if pref in ("auto", "tesseract") and shutil.which("tesseract"):
+        return "tesseract"
+    if pref in ("auto", "pytesseract"):
+        try:
+            import pytesseract  # type: ignore  # noqa: F401,F811
+            return "pytesseract"
+        except Exception:
+            return None
+    return None
+
+
+def normalise_ocr_sizes(lines):
+    """OCR boxes include descenders/ascenders, so raw heights jitter +-20 %. Snap near-median lines to the median so only
+    clearly larger lines (titles, headings) differ from body text."""
+    hs = sorted(l["size"] for l in lines if len(l["text"]) >= 12)
+    if len(hs) < 5:
+        return
+    med = hs[len(hs) // 2]
+    for l in lines:
+        if 0.7 * med <= l["size"] <= 1.3 * med:
+            l["size"] = med
+
+
+def assign_blocks(lines):
+    """Give OCR lines (which carry no paragraph info) block ids: a line joins the block whose last line sits right above it."""
+    open_blocks, nxt = [], 0
+    for ln in sorted(lines, key=lambda l: (l["bbox"][1], l["bbox"][0])):
+        size = max(ln["size"], 1)
+        best, bgap = None, 1e9
+        for ob in open_blocks:
+            lr = ob["last"]
+            gap = ln["bbox"][1] - lr["bbox"][3]
+            ov = min(ln["bbox"][2], lr["bbox"][2]) - max(ln["bbox"][0], lr["bbox"][0])
+            if -0.5 * size <= gap <= 0.9 * size and ov >= 0.3 * min(ln["bbox"][2] - ln["bbox"][0], lr["bbox"][2] - lr["bbox"][0]) and gap < bgap:
+                best, bgap = ob, gap
+        if best is None:
+            best = {"id": nxt, "last": ln}
+            nxt += 1
+            open_blocks.append(best)
+        best["last"] = ln
+        ln["block"] = best["id"]
+    return lines
+
+
+def ocr_page(backend, i, lang, dpi=None):
+    """Return (lines, info). Renders the page and runs the selected engine. Never invents text."""
     tool = find_ocr()
     if tool is None:
-        return None, "no OCR engine found (tesseract / pytesseract)"
+        return None, "no OCR engine found (rapidocr-onnxruntime / tesseract / pytesseract)"
+    dpi = dpi or (200 if tool == "rapidocr" else 300)
     tmp = tempfile.mkdtemp(prefix="ocr_")
     try:
         png = os.path.join(tmp, "p.png")
         if not backend.render_png(i, dpi, png):
             return None, "backend cannot render pages"
+        scale = 72.0 / dpi
+        lines = []
+        if tool == "rapidocr":
+            global _RAPID
+            ver = _rapid_module()
+            if _RAPID is None:
+                import logging
+                logging.getLogger("RapidOCR").setLevel(logging.WARNING)
+                if ver == "v3":
+                    from rapidocr import RapidOCR  # type: ignore
+                else:
+                    from rapidocr_onnxruntime import RapidOCR  # type: ignore
+                try:
+                    _RAPID = RapidOCR(params={"Global.log_level": "warning"}) if ver == "v3" else RapidOCR()
+                except Exception:
+                    _RAPID = RapidOCR()
+            if ver == "v3":
+                out = _RAPID(png, return_word_box=True)
+                wr = getattr(out, "word_results", None) or []
+                scores = list(getattr(out, "scores", None) or [])
+                for k, wline in enumerate(wr):
+                    words = [w for w in wline if str(w[0]).strip()]
+                    if not words:
+                        continue
+                    xs = [pt[0] for w in words for pt in w[2]]
+                    ys = [pt[1] for w in words for pt in w[2]]
+                    x0, y0, x1, y1 = min(xs) * scale, min(ys) * scale, max(xs) * scale, max(ys) * scale
+                    conf = scores[k] if k < len(scores) else (sum(float(w[1]) for w in words) / len(words))
+                    items = sorted(((str(w[0]).strip(), min(pt[0] for pt in w[2]), max(pt[0] for pt in w[2])) for w in words), key=lambda t: t[1])
+                    lines.append({"bbox": [x0, y0, x1, y1], "text": clean_text(_join_words(items, max(ys) - min(ys))),
+                                  "marked": None, "size": round((y1 - y0) * 0.9, 2), "bold": 0.0, "math": 0.0, "block": 0,
+                                  "dir": (1, 0), "ocr_conf": round(float(conf) * 100, 1)})
+            else:
+                res, _ = _RAPID(png)
+                for box, text, score in (res or []):
+                    if not str(text).strip():
+                        continue
+                    xs = [pt[0] for pt in box]
+                    ys = [pt[1] for pt in box]
+                    x0, y0, x1, y1 = min(xs) * scale, min(ys) * scale, max(xs) * scale, max(ys) * scale
+                    lines.append({"bbox": [x0, y0, x1, y1], "text": clean_text(str(text).strip()), "marked": None,
+                                  "size": round((y1 - y0) * 0.9, 2), "bold": 0.0, "math": 0.0, "block": 0, "dir": (1, 0),
+                                  "ocr_conf": round(float(score) * 100, 1)})
+            for l in lines:  # tall, narrow boxes are rotated text (arXiv stamp, axis labels): treat as margin text
+                if (l["bbox"][3] - l["bbox"][1]) > 2.5 * (l["bbox"][2] - l["bbox"][0]) and len(l["text"]) >= 3:
+                    l["dir"] = (0, -1)
+            normalise_ocr_sizes([l for l in lines if l["dir"] == (1, 0)])
+            assign_blocks(lines)
+            return lines, "ocr via rapidocr %s (bundled Chinese+English models; --lang is ignored)" % ver
         if tool == "tesseract":
             cmd = ["tesseract", png, "stdout", "-l", lang, "--psm", "1", "tsv"]
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
@@ -589,7 +719,6 @@ def ocr_page(backend, i, lang, dpi=300):
             import pytesseract  # type: ignore
             from PIL import Image  # type: ignore
             tsv = pytesseract.image_to_data(Image.open(png), lang=lang, output_type=pytesseract.Output.STRING)
-        scale = 72.0 / dpi
         groups = defaultdict(list)
         for row in tsv.split("\n")[1:]:
             c = row.split("\t")
@@ -600,8 +729,7 @@ def ocr_page(backend, i, lang, dpi=300):
             except ValueError:
                 continue
             groups[(c[2], c[3], c[4])].append((int(c[6]), int(c[7]), int(c[8]), int(c[9]), conf, c[11]))
-        lines = []
-        for k, (key, ws) in enumerate(sorted(groups.items(), key=lambda kv: (int(kv[0][0]), int(kv[0][1]), int(kv[0][2])))):
+        for key, ws in sorted(groups.items(), key=lambda kv: (int(kv[0][0]), int(kv[0][1]), int(kv[0][2]))):
             x0 = min(w[0] for w in ws) * scale
             y0 = min(w[1] for w in ws) * scale
             x1 = max(w[0] + w[2] for w in ws) * scale
@@ -948,7 +1076,7 @@ def classify_paragraph(lines, ctx):
     short = n_lines <= 2 and len(text) <= 160
     numbered = NUM_HEAD_RE.match(text)
     keyword = KEY_HEAD_RE.match(text) and len(text) < 60
-    big = size >= body + 0.9
+    big = size >= (body * 1.35 if ctx.get("ocr") else body + 0.9)
     if short and (big or (bold > 0.75 and size >= body - 0.6) or (keyword and bold > 0.4)) and not text.endswith((",", ";")):
         if not (text.endswith(".") and len(text) > 90):
             return {"type": "heading", "level": None, "flags": flags, "size": size}
@@ -1165,7 +1293,8 @@ def parse_pdf(path, out_dir, backend_name="auto", ocr_mode="auto", lang="eng", m
         # figure regions: images + vector-drawing clusters that carry several short text lines
         fig_rects = []
         for r in pg["images"]:
-            if area(r) > 0.01 * W * H:
+            # a picture that covers most of the page is a scan / page background, not a figure
+            if 0.01 * W * H < area(r) <= 0.7 * W * H:
                 fig_rects.append(list(r))
 
         def grow(r, m):
@@ -1217,7 +1346,7 @@ def parse_pdf(path, out_dir, backend_name="auto", ocr_mode="auto", lang="eng", m
                            "columns": ncols, "ocr": pg["ocr"], "ocr_note": pg["ocr_note"], "n_lines": len(lines),
                            "n_figures": len(fig_rects), "n_tables": len(pg["tables"])})
         # paragraphs
-        ctx = {"body": body_size, "height": H}
+        ctx = {"body": body_size, "height": H, "ocr": pg["ocr"]}
         order_no = 0
         page_items = []
         for blk in ordered:
@@ -1615,9 +1744,12 @@ def main(argv=None):
     ap.add_argument("--ocr", default="auto", choices=["auto", "off", "force"])
     ap.add_argument("--lang", default="eng", help="tesseract language, e.g. eng, chi_sim, eng+chi_sim")
     ap.add_argument("--max-pages", type=int, default=0)
+    ap.add_argument("--ocr-engine", default="auto", choices=["auto", "rapidocr", "tesseract", "pytesseract"], help="OCR engine preference")
     ap.add_argument("--no-tables", action="store_true")
     ap.add_argument("--ocr-budget", type=float, default=420.0, help="max seconds spent on OCR over the whole document")
     a = ap.parse_args(argv)
+    global OCR_ENGINE_PREF
+    OCR_ENGINE_PREF = a.ocr_engine
     os.makedirs(a.out, exist_ok=True)
     if not os.path.isfile(a.pdf):
         print(json.dumps({"status": "failed", "error": "input file not found: " + a.pdf}))

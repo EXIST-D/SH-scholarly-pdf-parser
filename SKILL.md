@@ -33,12 +33,13 @@ spend the remaining effort only where `check_parse` reports a problem or where t
 2. **Parse.** `parse_pdf.py INPUT.pdf --out DIR` writes `parsed.json` (all structure), `parsed.md` (readable, with
    `<!-- id pN -->` anchors) and `quality_report.json`. It prints one JSON line with `status`
    (`success | partial | failed`), counts, warnings.
-   Options: `--ocr auto|off|force` (default auto: only pages without a text layer), `--lang eng|chi_sim|eng+chi_sim`,
-   `--backend auto|pymupdf|pdfplumber|pypdf`, `--max-pages N`, `--no-tables`.
+   Options: `--ocr auto|off|force` (default auto: only pages without a text layer), `--ocr-engine auto|rapidocr|tesseract|pytesseract`,
+   `--lang eng|chi_sim|eng+chi_sim` (tesseract only), `--backend auto|pymupdf|pdfplumber|pypdf`, `--max-pages N`,
+   `--no-tables`, `--ocr-budget SECONDS` (default 420 for the whole document).
 3. **Self-check.** `check_parse.py` compares the parse with an independent plain extraction (word recall per page),
    and tests duplicates, header/footer leakage, order inversions, garbled glyphs, heading-number gaps, ragged tables.
    It prints `verdict: pass | warn | fail` and `recommended_actions`. Act on them:
-   - recall low / garbled -> re-run with `--ocr force` or `--backend pdfplumber`; keep the better parse.
+   - recall low -> re-run with `--backend pdfplumber`; garbled text layer -> `--ocr force`; keep the better parse.
    - order inversion -> open the listed block pairs (`locate_evidence.py --block ID`) and correct by reading `bbox`.
    - anything you cannot fix -> list it as uncertainty (step 6), never hide it.
 4. **Read the result in chunks.** `parsed.md` is the fastest way to read; use `parsed.json` for tables
@@ -67,7 +68,7 @@ spend the remaining effort only where `check_parse` reports a problem or where t
 |---|---|---|
 | Encrypted PDF | exits with `status:failed`, hint to ask for the password | do not guess passwords; report `refused` with reason |
 | Not a PDF / corrupt / 0 pages | `status:failed` + error text | report, keep the message verbatim |
-| Scanned page (no text layer) | tries OCR (tesseract) if installed, else marks the page `needs_ocr` in `unparsed` | state OCR was unavailable; do not transcribe from memory |
+| Scanned page (no text layer) | OCR with `rapidocr` (pip, Chinese+English) or `tesseract` if installed; every OCR line carries `ocr_confidence`; else the page is marked `needs_ocr` in `unparsed` | if OCR was unavailable say so; do not transcribe from memory; treat OCR text with confidence < 60 as uncertain |
 | Garbled fonts `(cid:..)`, U+FFFD, private-use glyphs | page kind `garbled_text_layer`, check -> fail | `--ocr force`, else report the pages as unreliable |
 | Journal font exposes `+`/`=` as `þ`/`¼` | repaired only with document-level evidence, logged in warnings and change records | mention it as a change record |
 | Tables without ruling lines | rebuilt from word positions (`strategy: words`) | treat cell alignment as medium confidence; say so |
@@ -77,8 +78,9 @@ spend the remaining effort only where `check_parse` reports a problem or where t
 ## Dependencies (no network needed at run time)
 Python 3.8+. Preferred: `pymupdf` (tested 2.1 / MuPDF 1.28; >=1.24 required for `find_tables` and
 `cluster_drawings`). Fallbacks, chosen automatically: `pdfplumber` (tested 0.11), then `pypdf` (degraded: no geometry,
-status `partial`). Optional OCR: `tesseract` CLI (+ language data) or `pytesseract`. Install if missing and allowed:
-`pip install pymupdf pdfplumber pypdf`. If no Python library is present, see the shell fallback in
+status `partial`). Optional OCR (only needed for scanned/garbled pages): `rapidocr` (pip; models are bundled in the wheel, no download at
+run time; handles Chinese + English) - preferred; or `tesseract` CLI (+ language data) / `pytesseract`. Install if missing and
+allowed: `pip install pymupdf pdfplumber pypdf rapidocr`. If no Python library is present, see the shell fallback in
 `references/failure-modes.md` (poppler `pdftotext`/`pdftoppm`, `tesseract`) and report `partial`.
 
 ## Honesty rules (hard)

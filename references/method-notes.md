@@ -4,8 +4,11 @@
 1. **Backend adapter** - PyMuPDF `get_text("dict")` lines with font size/bold/math-font flags, rotation, images and vector
    drawing clusters; pdfplumber and pypdf adapters produce the same line structure (pypdf has no geometry).
 2. **Text-layer triage per page** - `text`, `scanned` (almost no characters and images/none), `garbled_text_layer`
-   (U+FFFD / `(cid:)` > 5 %). Scanned/garbled pages go to OCR (tesseract TSV -> lines with bbox and confidence) within a
-   time budget (`--ocr-budget`, default 420 s); otherwise they are listed in `unparsed`.
+   (U+FFFD / `(cid:)` > 5 %). Scanned/garbled pages go to OCR within a
+   time budget (`--ocr-budget`, default 420 s); otherwise they are listed in `unparsed`. Engines (auto order): `rapidocr`
+   (v3 word-level boxes -> lines; spaces rebuilt from word-box gaps, none next to CJK; tall narrow boxes = rotated text ->
+   `margin`; font size snapped to the page median so only clearly larger lines can become headings), `tesseract` (TSV), `pytesseract`.
+   Full-page images are treated as scans, not as figures.
 3. **Furniture** - lines in the top/bottom 9.5 % whose digit-normalised text repeats on >= 30 % of pages, plus bare page
    numbers, become `header`/`footer`; rotated text (arXiv stamp) becomes `margin`. Kept in the output, excluded from the body.
 4. **Glyph repair** - Symbol-font private-use codes -> Greek/maths; ligatures expanded; `þ`->`+`, `¼`->`=` only if the
@@ -60,8 +63,12 @@ Comparison with a naive baseline on the same ground truth (PyMuPDF `get_text("bl
 - Fallback backends on BERT: pdfplumber recall 97.8 % / order 96.9 %; pypdf is degraded by design (no geometry).
 
 ## Known limits (honest list)
-- OCR: the integration (render -> tesseract TSV -> lines, bbox scaling, confidence flags, time budget) was exercised with a
-  stub `tesseract` that emits fixed TSV; **no real OCR engine was available locally**, so OCR accuracy is untested.
+- OCR (measured): `rapidocr` 3.10 (PP-OCRv6 bundled models, onnxruntime, CPU), ~4 s/page, on SYNTHETIC scans = 150-dpi rasters of
+  public paper pages: English word recall 99.4 % (ResNet p1,p4) and 99.2 % (BERT p1,p6), precision 99.7 %, no run-on words; a
+  synthetic Chinese+English page (made with a system Songti font): character similarity 99.5 %. **Not tested** on real scans
+  (skew, noise, stains, handwriting), tiny fonts, tables inside scans, or formulas; structure recovery on OCR pages (title,
+  headings) is basic. The `tesseract` path was only exercised with a stub that emits fixed TSV (interface/geometry test),
+  not with a real tesseract engine.
 - Not tested on real garbled-font (`(cid:)`) PDFs, CJK PDFs, rotated pages or three-column layouts; code paths exist.
 - Formulas are linearised text from the text layer (no LaTeX recovery); stacked uncertainties (`+0.03 / -0.04`) can be detached.
 - Borderless tables are rebuilt heuristically (medium confidence, flagged `strategy: words`); numeric columns with very

@@ -6,3 +6,4 @@ Helpers used while developing the Skill, kept for reproducibility. They need `py
 - `eval_order.py parsed.json gt.html` - paragraph-order accuracy against a LaTeX-derived (ar5iv) HTML page.
 - `baseline_eval.py paper.pdf gt.html tag` - same metric for a naive PyMuPDF `get_text("blocks")` baseline.
 - `make_shuffled.py in.pdf out.pdf first last` - builds a SYNTHETIC PDF with the same geometry but a shuffled content stream.
+- `ocr_eval.py` - OCR word recall/precision on SYNTHETIC scans (rasterised pages of public papers) vs their text layer.

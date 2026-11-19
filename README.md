@@ -32,8 +32,9 @@ GITHUB_URL.txt                作品的 GitHub 公开链接
 ## 依赖与安装
 - Python 3.8+；首选 `pymupdf`（开发时用 2.1 / MuPDF 1.28；需要 ≥1.24 才有 `find_tables`、`cluster_drawings`）。
 - 自动回退：`pdfplumber`（测过 0.11）→ `pypdf`（降级：无几何信息，结果状态为 `partial`）。
-- 可选 OCR：`tesseract` 命令行（及语言包），或 `pytesseract`。
-- 安装：`pip install pymupdf pdfplumber pypdf`；运行时不需要联网。
+- 可选 OCR（仅扫描页/乱码页需要）：优先 `rapidocr`（pip 安装，模型已打包在 wheel 里，运行时不需联网，中英文）；
+  也支持 `tesseract` 命令行或 `pytesseract`。
+- 安装：`pip install pymupdf pdfplumber pypdf rapidocr`；运行时不需要联网。
 - 来源与版本：均为 PyPI 官方包；脚本仅使用标准库 + 上述库。
 
 ## 使用步骤
@@ -46,7 +47,8 @@ python3 scripts/build_result.py --case /input/case.json --parsed parsed \
 python3 scripts/build_result.py --case /input/case.json --validate result.json   #   校验
 ```
 `parse_pdf.py` 常用参数：`--ocr auto|off|force`、`--lang eng|chi_sim|eng+chi_sim`、
-`--backend auto|pymupdf|pdfplumber|pypdf`、`--max-pages N`、`--no-tables`、`--ocr-budget 秒`。
+`--backend auto|pymupdf|pdfplumber|pypdf`、`--ocr-engine auto|rapidocr|tesseract|pytesseract`、`--max-pages N`、
+`--no-tables`、`--ocr-budget 秒`。
 
 ## 输出
 - `parsed.json`：全部结构（块、章节、表格、公式、参考文献、图、页眉页脚、`unparsed`、`warnings`）。
@@ -56,7 +58,7 @@ python3 scripts/build_result.py --case /input/case.json --validate result.json  
   无法确定的字段为 `null` 并列入 `_meta.unfilled_fields`，不会被编造。
 
 ## 异常与处置（详见 references/failure-modes.md）
-加密 PDF → 拒绝并提示向用户索取密码；非 PDF/损坏 → `failed` + 原始报错；扫描页 → OCR（有 tesseract 时），否则标
+加密 PDF → 拒绝并提示向用户索取密码；非 PDF/损坏 → `failed` + 原始报错；扫描页 → OCR（rapidocr/tesseract，逐行带置信度），否则标
 `needs_ocr`；乱码字体 → 标 `garbled_text_layer` 并建议 OCR；`þ/¼` 一类字体错码 → 仅在文档内有足够证据时修复并记录；
 无竖线表格 → 按词位置重建并标注中等置信度。
 
@@ -77,8 +79,10 @@ python3 scripts/build_result.py --case /input/case.json --validate result.json  
   本 Skill 顺序正确 98.2 %，基线默认 60.4 %、`sort=True` 83.0 %。
 
 ## 已知限制
-- OCR 只用**桩程序**验证了接口与坐标换算，本机没有真实 OCR 引擎，OCR 精度**未验证**。
-- 未在真实乱码字体、中日韩 PDF、旋转页面、三栏版式上做过测试（代码路径存在）。
+- OCR 只在**合成扫描**上测过：把公开论文页面栅格化成 150 dpi 图像，rapidocr 英文词召回 99.2–99.4 %、精度 99.7 %；
+  合成的中英混排页字符相似度 99.5 %（约 4 秒/页，CPU）。真实扫描件（倾斜、噪点、手写、小字号、扫描件里的表格/公式）**未测**，
+  OCR 页上的标题/章节识别较粗糙；`tesseract` 路径只用桩程序验证过接口，没有真实引擎。
+- 未在真实乱码字体、真实中日韩 PDF、旋转页面、三栏版式上做过测试（代码路径存在）。
 - 公式为文本层线性化结果，非 LaTeX；堆叠的上下标（如 `+0.03 / −0.04`）可能被拆开。
 - 无竖线表格为启发式重建；数字列间距极窄时可能合并。
 - 并排表格可能共用一个题注。
